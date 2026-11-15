@@ -12,19 +12,19 @@ Open http://localhost:3000. Next.js and FastAPI bind to this computer on ports 3
 
 ## Deploy to Vercel
 
-This repository is configured as **one Vercel project**: Next.js serves the site and `api/index.py` exposes the same FastAPI app as a Python function.
+This repository is configured as **one Vercel project**: Next.js serves the site, and three top-level Python functions expose the same FastAPI app: `api/health.py`, `api/extract.py`, and `api/search.py`. Vercel maps each file directly to `/api/health`, `/api/extract`, and `/api/search`; no rewrites are used.
 
-1. Commit and push these changes, then import the GitHub repository into Vercel. Keep the **Next.js** framework preset. If the site should be public, leave Deployment Protection off for the production domain.
+1. Commit and push these changes, then import the GitHub repository into Vercel. Keep the **Next.js** framework preset. Use the project's production domain; deployment-specific URLs are protected by Vercel Authentication by default.
 2. Add these Environment Variables for Production, Preview, and Development:
    - `GEMINI_API_KEY` (required for live searches)
    - `GEMINI_MODEL` (optional; default `gemini-3.5-flash-lite`)
    - `GEMINI_DAILY_LIMIT` and `GEMINI_RPM_LIMIT` (optional)
    - `MAX_CONCURRENT_SEARCHES` (optional; default `20`)
    - `ALLOWED_ORIGINS` (optional; comma-separated extra origins)
-3. Deploy. Vercel installs the root `requirements.txt`, builds `api/index.py`, and routes `/api/*` to that function through `vercel.json`. `next.config.mjs` proxies to localhost only when not running on Vercel.
+3. Deploy. Vercel installs the root `requirements.txt`, builds the three function files, and maps each to its route. `next.config.mjs` proxies to localhost only when not running on Vercel.
 4. Verify the deployment with `/api/health`; `liveAvailable` should be `true`. Then run a fictional extract and search.
 
-`vercel.json` sets a 300-second maximum for the Python function. `/api/extract` is bounded to 60 seconds and `/api/search` to 240 seconds. Streaming SSE works from the Python function; no separate backend service is required. Rate limits remain per instance and are best-effort, not distributed protection. See `docs/vercel-deployment.md` for troubleshooting.
+`vercel.json` uses the file-per-route pattern proven in the TrialHacks deployment. Health and extraction are limited to 60 seconds; search uses the plan's maximum. `/api/search` is bounded internally to 240 seconds, so a lower Vercel plan limit may cut it short. Streaming SSE works from the Python function; no separate backend service is required. Rate limits remain per instance and are best-effort, not distributed protection. See `docs/vercel-deployment.md` for troubleshooting.
 
 ## Current experience
 
@@ -99,7 +99,7 @@ npm run dev
 - `evaluation.py`: Agent 3 audit prompt, normalization, and tier recomputation.
 - `providers.py`, `research.py`: Gemini/ClinicalTrials.gov adapters, bounded retries, and the two-call search pipeline.
 - `limits.py`, `main.py`: request budgets and HTTP/SSE admission.
-- `api/index.py`, `vercel.json`: Vercel Python-function entry point and deployment configuration.
+- `api/health.py`, `api/extract.py`, `api/search.py`, `vercel.json`: Vercel Python-function entry points and deployment configuration.
 
 ## Privacy and use
 
