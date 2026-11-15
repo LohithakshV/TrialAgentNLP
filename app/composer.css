@@ -233,6 +233,9 @@ body:has(.composer-docked) { padding-bottom: 190px; }
 .match-tier { padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; background: #bcecd51a; color: var(--mint); }
 .tier-potential { background: #f0cf851a; color: #f0cf85; }
 .tier-low { background: #f29a9a1a; color: var(--red); }
+.tier-manual { background: #f0cf851a; color: #f0cf85; }
+.match-panel.manual { border-color: #f0cf8533; background: #141407; }
+.match-panel.manual .match-caption { color: #c9b98d; }
 .match-caption { margin-left: auto; font-size: 11px; color: #8fa096; }
 .match-summary { margin: 12px 0 0; color: #cfd9d2; line-height: 1.65; font-size: 14px; }
 .criteria-details { margin-top: 14px; border-top: 1px solid #ffffff0d; padding-top: 12px; }

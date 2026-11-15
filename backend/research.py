@@ -4,6 +4,7 @@ import httpx
 from datetime import datetime, timezone
 
 from .evaluation import evaluate
+from .evidence import manual_review
 from .limits import LimitError
 from .models import PreparedQuery
 from .privacy import clean_profile
@@ -59,13 +60,14 @@ def apply_evaluation(trial, evaluation):
     }
 
 
-def unaudited(trial):
+def unaudited(trial, profile):
+    review = manual_review(profile, trial)
     return {
         **trial,
         'matchScore': None,
         'matchTier': None,
-        'summary': 'Automated eligibility evaluation was unavailable. Review the registry criteria and discuss them with the study team.',
-        'criteria': [], 'strengths': [], 'gaps': [], 'unknowns': [],
+        'summary': review['summary'],
+        'criteria': review['criteria'], 'strengths': [], 'gaps': [], 'unknowns': [],
     }
 
 
@@ -104,24 +106,24 @@ async def search(profile):
             logger.warning('eligibility_audit_failed exception=%s status=%s code=%s', type(exc).__name__, status, code or '')
             yield 'progress', {'step': 2, 'message': 'Preparing your discussion guide'}
             yield 'result', result_payload(
-                profile, [unaudited(trial) for trial in trials], discussion_guide(profile),
+                profile, [unaudited(trial, profile) for trial in trials], discussion_guide(profile),
                 'standard', True,
-                'The automated eligibility audit was unavailable. Registry records are shown for manual review.',
-                'unavailable',
+                'This search shows a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.',
+                'manual-review',
             )
             return
 
         evaluations = {evaluation.nctId: evaluation for evaluation in audit.evaluations}
-        merged = [apply_evaluation(trial, evaluations[trial['id']]) if trial['id'] in evaluations else unaudited(trial) for trial in trials]
+        merged = [apply_evaluation(trial, evaluations[trial['id']]) if trial['id'] in evaluations else unaudited(trial, profile) for trial in trials]
         partial = len(evaluations) < len(trials)
         if audit.guide:
             guide, guide_origin = [question.model_dump() for question in audit.guide], 'ai'
         else:
             guide, guide_origin = discussion_guide(profile), 'standard'
         if not evaluations:
-            reason, evaluation_status = 'The automated eligibility audit was unavailable. Registry records are shown for manual review.', 'unavailable'
+            reason, evaluation_status = 'This search shows a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.', 'manual-review'
         elif partial:
-            reason, evaluation_status = 'Some trials could not be audited. Those records are shown for manual review.', 'ai-assisted'
+            reason, evaluation_status = 'Some records show a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.', 'ai-assisted'
         else:
             reason, evaluation_status = '', 'ai-assisted'
         yield 'progress', {'step': 2, 'message': 'Preparing your discussion guide'}
