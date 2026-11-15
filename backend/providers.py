@@ -1,8 +1,29 @@
+import asyncio
 import json
 import os
 import re
+
+import httpx
+
 from .limits import limits, LimitError
 from .evidence import record_evidence
+
+MAX_ATTEMPTS = 3
+BASE_DELAY = 0.8
+
+
+def _daily_quota(response):
+    details = str(response.json().get('error', {}).get('details', [])).lower()
+    return 'perday' in details or 'per_day' in details or 'requestsperday' in details
+
+
+def _retry_after(response):
+    value = response.headers.get('retry-after', '').strip()
+    return int(value) if value.isdigit() else None
+
+
+async def _backoff(attempt):
+    await asyncio.sleep(min(BASE_DELAY * (2 ** attempt), 8.0))
 
 
 async def gemini(client, instruction, data, schema):
@@ -12,24 +33,38 @@ async def gemini(client, instruction, data, schema):
     model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite')
     if not re.fullmatch(r'[a-zA-Z0-9._-]+', model):
         raise ValueError('invalid_model')
-    limits.reserve_gemini()
-    response = await client.post(
-        f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
-        headers={'x-goog-api-key': key},
-        json={'systemInstruction': {'parts': [{'text': instruction}]},
-              'contents': [{'role': 'user', 'parts': [{'text': json.dumps(data)}]}],
-              'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': schema}},
-    )
-    if response.status_code == 429:
-        # Inspect quota identifiers internally; never echo provider payloads.
-        details = str(response.json().get('error', {}).get('details', [])).lower()
-        daily = 'perday' in details or 'per_day' in details or 'requestsperday' in details
-        if daily:
-            raise LimitError('provider_daily_limit', 'Google’s daily request quota has been reached. Please return after the daily reset.', limits.exhaust_provider())
-        raise LimitError('provider_rate_limit', 'Google’s request or token limit was reached. Please wait a minute before trying again.', 60)
-    response.raise_for_status()
-    parts = response.json().get('candidates', [{}])[0].get('content', {}).get('parts', [])
-    return json.loads(''.join(p.get('text', '') for p in parts if not p.get('thought')))
+    for attempt in range(MAX_ATTEMPTS):
+        limits.reserve_gemini()
+        try:
+            response = await client.post(
+                f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+                headers={'x-goog-api-key': key},
+                json={'systemInstruction': {'parts': [{'text': instruction}]},
+                      'contents': [{'role': 'user', 'parts': [{'text': json.dumps(data)}]}],
+                      'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': schema}},
+            )
+        except httpx.RequestError:
+            if attempt + 1 >= MAX_ATTEMPTS:
+                raise
+            await _backoff(attempt)
+            continue
+        if response.status_code == 429:
+            # Inspect quota identifiers internally; never echo provider payloads.
+            if _daily_quota(response):
+                raise LimitError('provider_daily_limit', 'Google’s daily request quota has been reached. Please return after the daily reset.', limits.exhaust_provider())
+            retry_after = _retry_after(response)
+            if attempt + 1 < MAX_ATTEMPTS:
+                await asyncio.sleep(min(retry_after or BASE_DELAY * (2 ** attempt), 8.0))
+                continue
+            raise LimitError('provider_rate_limit', 'Google’s request or token limit was reached. Please wait a minute before trying again.', retry_after or 60)
+        if 500 <= response.status_code < 600:
+            if attempt + 1 < MAX_ATTEMPTS:
+                await _backoff(attempt)
+                continue
+        response.raise_for_status()
+        parts = response.json().get('candidates', [{}])[0].get('content', {}).get('parts', [])
+        return json.loads(''.join(p.get('text', '') for p in parts if not p.get('thought')))
+    raise RuntimeError('provider_attempts_exhausted')
 
 
 def registry_contacts(protocol, city):
@@ -54,8 +89,21 @@ async def retrieve(client, profile):
     params = {'format': 'json', 'query.cond': profile.condition, 'filter.overallStatus': 'RECRUITING', 'pageSize': 8}
     if profile.city:
         params['query.locn'] = profile.city
-    response = await client.get('https://clinicaltrials.gov/api/v2/studies', params=params)
-    response.raise_for_status()
+    response = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            response = await client.get('https://clinicaltrials.gov/api/v2/studies', params=params)
+        except httpx.RequestError:
+            if attempt + 1 >= MAX_ATTEMPTS:
+                raise
+            await _backoff(attempt)
+            continue
+        if response.status_code == 429 or 500 <= response.status_code < 600:
+            if attempt + 1 < MAX_ATTEMPTS:
+                await asyncio.sleep(min(_retry_after(response) or BASE_DELAY * (2 ** attempt), 8.0))
+                continue
+        response.raise_for_status()
+        break
     trials = []
     for study in response.json().get('studies', []):
         p = study.get('protocolSection', {})

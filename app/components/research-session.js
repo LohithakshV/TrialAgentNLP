@@ -3,7 +3,6 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MotionConfig } from 'motion/react';
 import { postJSON, readEvents } from '../lib/research-client.mjs';
-import { applyPreparedGuide } from '../lib/prepared-guide.mjs';
 import { promptFeedback } from '../lib/prompt-feedback.mjs';
 
 const Session = createContext(null);
@@ -48,7 +47,7 @@ export function ResearchSession({ children }) {
       const response = await postJSON('/api/extract', { note, consent: true }, request.controller.signal);
       const data = await response.json();
       if (request.id !== active.current.id) return;
-      if (data.status !== 'ready' || !data.profile?.condition || !Array.isArray(data.guide) || data.guide.length !== 5) throw new Error('We could not prepare this search. Please edit your question and try again.');
+      if (data.status !== 'ready' || !data.profile?.condition) throw new Error('We could not prepare this search. Please edit your question and try again.');
       setProfile(data.profile); setPrepared(data); setPhase('review');
     } catch (err) {
       if (request.id === active.current.id && err.name !== 'AbortError') {
@@ -69,7 +68,7 @@ export function ResearchSession({ children }) {
         if (request.id !== active.current.id) return;
         if (kind === 'progress') setProgress(data);
         if (kind === 'records' || kind === 'result') {
-          setResult(applyPreparedGuide(data, prepared, profile));
+          setResult(data);
         }
       });
     } catch (err) { if (request.id === active.current.id && err.name !== 'AbortError') setError(err.message); }

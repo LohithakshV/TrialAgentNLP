@@ -4,14 +4,24 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 from backend.main import app
-from backend.models import Profile, PreparedQuery
-from backend.privacy import redact_identifiers
+from backend.models import AuditResponse, Criterion, Profile, PreparedQuery, TrialEvaluation
 from backend.providers import retrieve
 from backend.research import prepare, search
 from backend.limits import RequestLimits
 
 PROFILE = dict(condition='Lung cancer', stage='IIIA', biomarkers=['EGFR'], city='Atlanta')
 GUIDE = [{'title': f'Question {i}', 'question': 'What should the study team confirm?'} for i in range(5)]
+
+
+def audit(score=82, nct='NCT12345678'):
+    return AuditResponse(
+        evaluations=[TrialEvaluation(
+            nctId=nct, matchScore=score, tier='strong', summary='Aligned on condition.',
+            criteria=[Criterion(label='Condition', state='met', reason='Listed in the registry.')],
+            strengths=['Condition matches'], gaps=[], unknowns=[],
+        )],
+        guide=GUIDE,
+    )
 
 
 class Routes(unittest.TestCase):
@@ -38,10 +48,10 @@ class Routes(unittest.TestCase):
         self.assertNotIn('SECRET', response.text)
 
     def test_extraction_success_and_no_store(self):
-        with patch('backend.main.prepare', new=AsyncMock(return_value=PreparedQuery(status='ready',profile=PROFILE,guide=GUIDE))) as model:
+        with patch('backend.main.prepare', new=AsyncMock(return_value=PreparedQuery(status='ready',profile=PROFILE))) as model:
             response = self.client.post('/api/extract', json={'note': 'A fictional query about lung cancer around Atlanta', 'consent':True})
         self.assertEqual(response.json()['profile'], PROFILE)
-        self.assertEqual(len(response.json()['guide']), 5)
+        self.assertNotIn('guide', response.json())
         self.assertEqual(response.headers['cache-control'], 'no-store')
         self.assertEqual(model.await_count, 1)
 
@@ -51,13 +61,20 @@ class Routes(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
 
     def test_short_condition_name_is_a_valid_prompt(self):
-        with patch('backend.main.prepare', new=AsyncMock(return_value=PreparedQuery(status='ready',profile={**PROFILE,'condition':'Asthma'},guide=GUIDE))):
+        with patch('backend.main.prepare', new=AsyncMock(return_value=PreparedQuery(status='ready',profile={**PROFILE,'condition':'Asthma'}))):
             response = self.client.post('/api/extract', json={'note':'asthma','consent':True})
         self.assertEqual(response.status_code, 200)
 
     def test_foreign_origin_rejected(self):
         response = self.client.post('/api/search', json=self.payload, headers={'Origin': 'https://example.com'})
         self.assertEqual(response.status_code, 403)
+
+    def test_same_host_origin_is_allowed(self):
+        async def pipeline(profile):
+            yield 'result', {'trials': [], 'profile': profile.model_dump()}
+        with patch('backend.main.search', new=pipeline):
+            response = self.client.post('/api/search', json=self.payload, headers={'Origin': 'http://testserver'})
+        self.assertNotEqual(response.status_code, 403)
 
     def test_large_body_rejected(self):
         self.assertEqual(self.client.post('/api/extract', content='x' * 30001).status_code, 413)
@@ -88,12 +105,6 @@ class Routes(unittest.TestCase):
             response = self.client.post('/api/search', json=self.payload)
         self.assertIn('event: error', response.text)
         self.assertNotIn('SECRET', response.text)
-
-    def test_identifier_filter_preserves_biomarker(self):
-        text = redact_identifiers('Name: Jane Doe; MRN: 12345; EGFR exon 19 deletion; jane@example.com; 555-123-4567')
-        for secret in ['Jane Doe', '12345', 'jane@example.com', '555-123-4567']:
-            self.assertNotIn(secret, text)
-        self.assertIn('EGFR exon 19 deletion', text)
 
     def test_daily_limit_returns_machine_code_and_retry_header(self):
         limiter = RequestLimits(daily=1)
@@ -131,30 +142,48 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trials[0]['url'], 'https://clinicaltrials.gov/study/NCT12345678')
         self.assertNotIn('SECRET', str(seen[0].url))
 
-    async def test_registry_records_and_questions_need_no_second_model_call(self):
-        trials = [dict(id='NCT12345678', title='Registry record', eligibility='criteria', summary='Manual review needed')]
-        with patch('backend.research.gemini', new_callable=AsyncMock) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
+    async def test_registry_records_are_audited_by_one_batched_model_call(self):
+        trials = [dict(id='NCT12345678', title='Registry record', eligibility='criteria', description='Manual review needed')]
+        with patch('backend.research.evaluate', new=AsyncMock(return_value=audit())) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
             events = [item async for item in search(Profile(**PROFILE))]
         result = events[-1][1]
-        self.assertEqual(result['trials'][0]['id'], 'NCT12345678')
+        self.assertEqual(result['trials'][0]['matchScore'], 82)
+        self.assertEqual(result['trials'][0]['matchTier'], 'strong')
+        self.assertEqual(result['guideOrigin'], 'ai')
         self.assertEqual(len(result['guide']), 5)
-        self.assertIn('eligibility', result['trials'][0])
-        model.assert_not_called()
+        self.assertFalse(result['partial'])
+        model.assert_awaited_once()
 
-    async def test_empty_results_do_not_invoke_model(self):
-        with patch('backend.research.gemini', new_callable=AsyncMock) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=[])):
+    async def test_audit_failure_keeps_registry_records_with_standard_guide(self):
+        trials = [dict(id='NCT12345678', title='Registry record', eligibility='criteria', description='Manual review needed')]
+        with patch('backend.research.evaluate', new=AsyncMock(side_effect=ValueError('SECRET'))), patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
+            events = [item async for item in search(Profile(**PROFILE))]
+        result = events[-1][1]
+        self.assertTrue(result['partial'])
+        self.assertIsNone(result['trials'][0]['matchScore'])
+        self.assertEqual(result['guideOrigin'], 'standard')
+        self.assertEqual(len(result['guide']), 5)
+        self.assertNotIn('SECRET', str(result))
+
+    async def test_empty_results_do_not_invoke_the_audit(self):
+        with patch('backend.research.evaluate', new_callable=AsyncMock) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=[])):
             events = [item async for item in search(Profile(**PROFILE))]
         self.assertEqual(events[-1][1]['trials'], [])
         model.assert_not_called()
 
-    async def test_one_model_call_prepares_prose_and_questions_then_registry_only(self):
+    async def test_two_model_calls_prepare_then_audit(self):
         trials = [dict(id='NCT12345678',title='Real source record', description='From registry')]
-        generated = {'status': 'ready', 'profile': PROFILE, 'guide': GUIDE}
-        with patch('backend.research.gemini', new=AsyncMock(return_value=generated)) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
+        generated = {'status': 'ready', 'profile': PROFILE}
+        audit_result = {
+            'evaluations': [{'nctId': 'NCT12345678', 'matchScore': 74, 'tier': 'potential', 'summary': 'Partly aligned.', 'criteria': [], 'strengths': [], 'gaps': [], 'unknowns': []}],
+            'guide': GUIDE,
+        }
+        with patch('backend.research.gemini', new=AsyncMock(return_value=generated)) as probe, patch('backend.evaluation.gemini', new=AsyncMock(return_value=audit_result)) as audit_model, patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
             prepared = await prepare('Fictional research: lung cancer IIIA EGFR around Atlanta')
             events = [item async for item in search(Profile(**prepared.profile.model_dump()))]
-        self.assertEqual(model.await_count, 1)
+        self.assertEqual(probe.await_count, 1)
+        self.assertEqual(audit_model.await_count, 1)
         self.assertEqual(prepared.profile.condition,'Lung cancer')
-        self.assertEqual(len(prepared.guide),5)
         self.assertEqual(events[-1][1]['trials'][0]['description'],'From registry')
+        self.assertEqual(events[-1][1]['trials'][0]['matchScore'], 74)
         self.assertEqual(len(events[-1][1]['guide']), 5)

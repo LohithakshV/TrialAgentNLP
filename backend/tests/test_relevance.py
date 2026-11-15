@@ -11,14 +11,13 @@ from backend.providers import retrieve
 from backend.research import prepare
 
 
-GUIDE = [{'title': f'Question {i}', 'question': 'What should the study team confirm?'} for i in range(5)]
 PROFILE = dict(condition='Asthma', stage='', biomarkers=[], city='Boston')
 
 
 class RelevanceRoutes(unittest.TestCase):
     def test_unrelated_and_incomplete_prompts_return_actionable_422_without_registry(self):
         for status, note in [('off_topic', 'Write me a poem about pizza.'), ('needs_details', 'What does randomized mean in clinical trials?')]:
-            with self.subTest(status=status), patch.dict('os.environ', {'GEMINI_API_KEY': 'fake-test-key'}), patch('backend.main.limits', RequestLimits()), patch('backend.research.gemini', new=AsyncMock(return_value={'status': status, 'profile': PROFILE, 'guide': GUIDE})) as model, patch('backend.research.retrieve', new_callable=AsyncMock) as registry:
+            with self.subTest(status=status), patch.dict('os.environ', {'GEMINI_API_KEY': 'fake-test-key'}), patch('backend.main.limits', RequestLimits()), patch('backend.research.gemini', new=AsyncMock(return_value={'status': status, 'profile': PROFILE})) as model, patch('backend.research.retrieve', new_callable=AsyncMock) as registry:
                 response = TestClient(app).post('/api/extract', json={'note': note, 'consent': True})
                 self.assertEqual(response.status_code, 422)
                 self.assertEqual(response.json()['code'], status)
@@ -30,30 +29,27 @@ class RelevanceRoutes(unittest.TestCase):
 
 
 class Preparation(unittest.IsolatedAsyncioTestCase):
-    async def test_ready_condition_returns_five_questions_in_one_classified_response(self):
-        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'ready', 'profile': PROFILE, 'guide': GUIDE})) as model:
+    async def test_ready_condition_returns_a_reviewed_profile_in_one_classified_response(self):
+        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'ready', 'profile': PROFILE})) as model:
             result = await prepare('Fictional asthma research near Boston')
         self.assertEqual(result.status, 'ready')
         self.assertEqual(result.profile.condition, 'Asthma')
-        self.assertEqual(len(result.guide), 5)
         self.assertEqual(model.await_count, 1)
 
-    async def test_non_ready_result_cannot_keep_a_model_invented_profile_or_questions(self):
-        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'off_topic', 'profile': PROFILE, 'guide': GUIDE})):
+    async def test_non_ready_result_cannot_keep_a_model_invented_profile(self):
+        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'off_topic', 'profile': PROFILE})):
             result = await prepare('Write a poem')
         self.assertEqual(result.status, 'off_topic')
         self.assertEqual(result.profile.condition, '')
-        self.assertEqual(result.guide, [])
 
     async def test_ready_without_a_condition_is_downgraded_to_needs_details(self):
-        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'ready', 'profile': {**PROFILE, 'condition': ''}, 'guide': GUIDE})):
+        with patch('backend.research.gemini', new=AsyncMock(return_value={'status': 'ready', 'profile': {**PROFILE, 'condition': ''}})):
             result = await prepare('Find studies')
         self.assertEqual(result.status, 'needs_details')
-        self.assertEqual(result.guide, [])
 
     async def test_missing_or_unknown_classification_fails_closed(self):
         for status in [None, 'probably_ready']:
-            value = {'profile': PROFILE, 'guide': GUIDE}
+            value = {'profile': PROFILE}
             if status is not None:
                 value['status'] = status
             with self.subTest(status=status), patch('backend.research.gemini', new=AsyncMock(return_value=value)):
@@ -81,7 +77,7 @@ class RegistryFacts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['contacts'][1]['location'], 'Boston')
         self.assertFalse(result['contactsTruncated'])
 
-    async def test_facts_and_eligibility_checklist_are_source_based_not_match_scores(self):
+    async def test_facts_and_evidence_checklist_are_source_based_not_match_scores(self):
         protocol = {
             'identificationModule': {'nctId': 'NCT12345678', 'briefTitle': 'A registry study'},
             'statusModule': {'overallStatus': 'RECRUITING', 'lastUpdatePostDateStruct': {'date': '2026-11-01'}},

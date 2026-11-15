@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readEvents, postJSON } from './research-client.mjs';
-import { applyPreparedGuide } from './prepared-guide.mjs';
 import { promptFeedback } from './prompt-feedback.mjs';
 const stream = chunks => new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk)); controller.close(); } });
 test('SSE survives arbitrary chunk boundaries and CRLF', async () => {
@@ -28,13 +27,6 @@ test('HTTP burst errors include the retry delay', async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({error:'Too many requests.',code:'burst_limit',retryAfter:60}), {status:429,headers:{'Content-Type':'application/json'}});
   try { await assert.rejects(postJSON('/api/search',{}), error => error.code === 'burst_limit' && /60 seconds/.test(error.message)); }
   finally { globalThis.fetch = original; }
-});
-test('editing the extracted profile cannot reuse stale generated questions', () => {
-  const profile = {condition:'Lung cancer',city:'Atlanta'};
-  const prepared = {profile,guide:[{title:'Original prompt question'}]};
-  const result = {guide:[{title:'Updated standard question'}],guideOrigin:'standard'};
-  assert.equal(applyPreparedGuide(result,prepared,profile).guideOrigin,'ai');
-  assert.equal(applyPreparedGuide(result,prepared,{...profile,city:'Seattle'}).guideOrigin,'standard');
 });
 test('unrelated prompts get a fixed actionable message and trusted learning link', () => {
   const feedback = promptFeedback('off_topic');

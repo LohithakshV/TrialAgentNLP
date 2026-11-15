@@ -4,21 +4,16 @@
 
 `POST /api/extract`, JSON `{ "note": "Fictional asthma studies near Boston", "consent": true }`.
 
-One Gemini request performs classification, extraction, and question preparation. The schema requires a status of `ready`, `needs_details`, or `off_topic`; unknown or missing statuses fail closed. Non-ready responses discard all model-produced profile details and questions. A ready response without a condition is downgraded to `needs_details`.
+One Gemini request performs classification and extraction. The schema requires a status of `ready`, `needs_details`, or `off_topic`; unknown or missing statuses fail closed. Non-ready responses discard all model-produced profile details. A ready response without a condition is downgraded to `needs_details`. This step does not generate discussion questions.
 
 HTTP 200, ready response:
 
 ```json
 {
   "status": "ready",
-  "profile": { "condition": "Asthma", "stage": "", "biomarkers": [], "city": "Boston" },
-  "guide": [
-    { "title": "Requirements to confirm", "question": "Which tests and records would the study team need to review?" }
-  ]
+  "profile": { "condition": "Asthma", "stage": "", "biomarkers": [], "city": "Boston" }
 }
 ```
-
-The guide above is abbreviated for documentation; actual ready responses require exactly five questions.
 
 HTTP 422, semantic rejection:
 
@@ -33,15 +28,43 @@ HTTP 422, semantic rejection:
 
 Classification is model-assisted and can be wrong; schema validation checks structure, not clinical truth. This is not an authentication or security boundary. `/api/search` accepts the reviewed profile independently and has its own consent, field validation, and rate limits.
 
-## Retrieve records
+## Retrieve records and audit eligibility
 
 `POST /api/search`, JSON `{ "profile": { "condition": "Asthma", "stage": "", "biomarkers": [], "city": "Boston" }, "consent": true }`.
 
-The response is SSE with JSON `progress` and terminal `result` events. It makes **zero Gemini calls**. The result contains `profile`, `trials`, five standard fallback questions, `guideOrigin`, `source`, `retrievedAt`, and `searchScope`. The browser uses previously prepared AI questions only while the reviewed profile remains unchanged.
+The response is SSE with JSON `progress` and terminal `result` events. The request makes one registry call and **one batched Gemini audit call**. The result contains `profile`, `trials`, a five-question `guide`, `guideOrigin`, `source`, `retrievedAt`, `searchScope`, and `partial`. If the audit fails after bounded retries, real records are still returned with `partial: true`, `partialReason`, `guideOrigin: "standard"`, and standard questions. A zero-result search skips the audit and returns `partial: false`.
 
-The registry query uses condition, optional city, recruiting status, and a limit of eight. Stage and biomarkers are context for manual source review; they are not query filters. Registry order is preserved. Recruiting status does not establish a local site's availability.
+The registry query uses condition, optional city, recruiting status, and a limit of eight. Stage and biomarkers are not query filters. Registry order is preserved. Recruiting status does not establish a local site's availability.
 
 Each record includes the NCT ID, title, phase, listed site cities, conditions, interventions, lead sponsor, study type, listed age range and sex categories, registry update date, source excerpts, and a direct ClinicalTrials.gov URL constructed from a validated NCT ID. Overviews are limited to 4,000 characters and criteria to 14,000 characters; the UI labels them as excerpts and links to the full record.
+
+The audit receives only `condition`, `stage`, and `biomarkers` plus truncated public registry title, phase, conditions, interventions, eligibility text, and summary. It never receives the original note, name, city, contacts, or NCT identifiers other than the record IDs needed to align results.
+
+### Evaluation fields
+
+```json
+{
+  "matchScore": 82,
+  "matchTier": "strong",
+  "summary": "The record lists the same condition and an age range that appears consistent with the reviewed profile.",
+  "criteria": [
+    { "label": "Condition: non-small cell lung cancer", "state": "met", "reason": "The listed condition matches." },
+    { "label": "EGFR biomarker", "state": "unknown", "reason": "Biomarker results are not part of the registry text." },
+    { "label": "Prior EGFR inhibitor", "state": "unmet", "reason": "The criteria exclude prior treatment with this class." }
+  ],
+  "strengths": ["Condition matches"],
+  "gaps": ["Prior treatment may conflict"],
+  "unknowns": ["Current test results"]
+}
+```
+
+- `matchScore` is a 0–100 educational estimate, not a probability or eligibility decision.
+- `matchTier` is recomputed from the score: `strong` 80–100, `potential` 50–79, `low` 0–49.
+- `state` is `met`, `unmet`, or `unknown`. Missing facts stay `unknown`; they are never treated as mismatches.
+- `summary`, `criteria`, `strengths`, `gaps`, and `unknowns` are model-generated from the supplied registry text and can be wrong.
+- On partial results, failed evaluations have `matchScore: null`, `matchTier: null`, empty criteria/lists, and a manual-review summary.
+
+The five `guide` questions are generated by the audit. If the model does not return exactly five, the server withholds them and uses the standard five questions based on the reviewed profile. `guideOrigin` is `"ai"` or `"standard"`.
 
 `apiUrl` is the official public JSON URL for the validated NCT ID. `contacts` contains registry-listed name, role, email, phone, and location fields; central contacts are prioritized, followed by site contacts near the requested city. Duplicates are removed and at most six contacts are returned. `contactsTruncated` identifies a selected list. Missing contact information is not invented.
 
@@ -49,7 +72,7 @@ Study titles and the primary reader action show the already-retrieved source det
 
 ## Literal source-overlap checklist
 
-`trial.evidence` is calculated on the server without a model call:
+`trial.evidence` is calculated on the server without a model call and is secondary to the eligibility audit:
 
 ```json
 {
@@ -65,11 +88,11 @@ Study titles and the primary reader action show the already-retrieved source det
 }
 ```
 
-- `listed`: a supplied condition or city is literally found in the structured registry conditions/site-city list. A mint check indicates this source fact only.
-- `wording_to_review`: the term is found in overview or eligibility wording. This may be an exclusion and is never marked as a requirement met.
+- `listed`: a supplied condition or city is literally found in the structured registry conditions/site-city list.
+- `wording_to_review`: the term is found in overview or eligibility wording. This may be an exclusion.
 - `not_located`: no literal phrase was found in the inspected fields/excerpts. Synonyms, spelling differences, abbreviations, and text outside the excerpts can be missed. This does not establish a mismatch or exclusion.
 - `not_provided`: the optional detail was absent. It is excluded from the denominator. Each supplied biomarker counts as one detail.
 
-Matching is case-insensitive and tolerates punctuation between words; it does not interpret negation, combine aliases, infer diagnoses, evaluate clinical criteria, or rank clinical suitability. Excerpts retain surrounding source text and highlight literal wording. There are no met/not-met eligibility decisions or eligibility percentages.
+Matching is case-insensitive and tolerates punctuation between words; it does not interpret negation, combine aliases, infer diagnoses, or rank clinical suitability. The eligibility audit above is the primary signal; the literal checklist only shows wording overlap. Excerpts retain surrounding source text and highlight literal wording.
 
 Medical context: [NCI's guide to finding a trial](https://www.cancer.gov/research/participate/clinical-trials-search/steps). Structured classification uses [Gemini's JSON Schema output](https://aistudio.google.com/docs/structured-output). Trial data comes from the [ClinicalTrials.gov API](https://clinicaltrials.gov/data-api/api).

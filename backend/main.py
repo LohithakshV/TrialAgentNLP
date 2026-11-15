@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -18,18 +19,50 @@ load_dotenv(Path(__file__).resolve().parents[1] / '.env')
 from .limits import limits, LimitError
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 UPSTREAM_ERRORS = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, TimeoutError)
+LOCAL_ORIGINS = {'http://localhost:3000', 'http://127.0.0.1:3000'}
+EXTRACT_TIMEOUT = 60
+SEARCH_TIMEOUT = 240
 
 
 def error(message, status=400):
     return JSONResponse({'error': message}, status_code=status, headers={'Cache-Control': 'no-store'})
 
 
-async def parse_request(request, model):
+def client_host(request):
+    """Use the platform-provided client address on Vercel, the socket address locally."""
+    if os.getenv('VERCEL'):
+        forwarded = request.headers.get('x-vercel-forwarded-for') or request.headers.get('x-forwarded-for', '')
+        first = forwarded.split(',')[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else 'unknown'
+
+
+def origin_allowed(request):
     origin = request.headers.get('origin')
-    if origin and origin not in ('http://localhost:3000', 'http://127.0.0.1:3000'):
-        return error('This prototype accepts local requests only.', 403)
+    if not origin:
+        return True
+    configured = {
+        value.strip().rstrip('/')
+        for value in os.getenv('ALLOWED_ORIGINS', '').split(',')
+        if value.strip()
+    }
+    if '*' in configured:
+        return True
+    normalized = origin.rstrip('/')
+    if normalized in configured or normalized in LOCAL_ORIGINS:
+        return True
     try:
-        limits.guard(request.client.host if request.client else 'unknown')
+        return urlparse(normalized).netloc == request.headers.get('host', '')
+    except ValueError:
+        return False
+
+
+async def parse_request(request, model):
+    if not origin_allowed(request):
+        return error('This request origin is not allowed.', 403)
+    try:
+        limits.guard(client_host(request))
     except LimitError as exc:
         return limit_response(exc)
     body = bytearray()
@@ -64,8 +97,8 @@ async def extract_route(request: Request):
         return submission
     client_key = None
     try:
-        client_key = limits.guard(request.client.host if request.client else 'unknown', search=True, model=True)
-        async with asyncio.timeout(50):
+        client_key = limits.guard(client_host(request), search=True, model=True)
+        async with asyncio.timeout(EXTRACT_TIMEOUT):
             prepared = await prepare(submission.note)
         if prepared.status != 'ready':
             message = {
@@ -93,13 +126,13 @@ async def search_route(request: Request):
     if isinstance(submission, JSONResponse):
         return submission
     try:
-        client_key = limits.guard(request.client.host if request.client else 'unknown', search=True)
+        client_key = limits.guard(client_host(request), search=True)
     except LimitError as exc:
         return limit_response(exc)
 
     async def stream():
         try:
-            async with asyncio.timeout(110):
+            async with asyncio.timeout(SEARCH_TIMEOUT):
                 async for kind, data in search(clean_profile(submission.profile)):
                     if await request.is_disconnected():
                         return

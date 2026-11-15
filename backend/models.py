@@ -26,7 +26,6 @@ class Question(StrictModel):
 class PreparedQuery(StrictModel):
     status: Literal['ready', 'needs_details', 'off_topic']
     profile: DraftProfile
-    guide: list[Question] = Field(max_length=5)
 
     @model_validator(mode='after')
     def enforce_preparation_state(self):
@@ -35,10 +34,29 @@ class PreparedQuery(StrictModel):
         if self.status != 'ready':
             # An unrelated request cannot carry a model-invented search profile.
             self.profile = DraftProfile()
-            self.guide = []
-        elif len(self.guide) != 5:
-            raise ValueError('A ready search requires five discussion questions.')
         return self
+
+
+class Criterion(StrictModel):
+    label: str = Field(min_length=1, max_length=200)
+    state: Literal['met', 'unmet', 'unknown']
+    reason: str = Field(default='', max_length=400)
+
+
+class TrialEvaluation(StrictModel):
+    nctId: str = Field(pattern=r'^NCT\d{8}$')
+    matchScore: int = Field(ge=0, le=100)
+    tier: Literal['strong', 'potential', 'low']
+    summary: str = Field(default='', max_length=800)
+    criteria: list[Criterion] = Field(default_factory=list, max_length=15)
+    strengths: list[str] = Field(default_factory=list, max_length=8)
+    gaps: list[str] = Field(default_factory=list, max_length=8)
+    unknowns: list[str] = Field(default_factory=list, max_length=8)
+
+
+class AuditResponse(StrictModel):
+    evaluations: list[TrialEvaluation] = Field(default_factory=list, max_length=8)
+    guide: list[Question] = Field(default_factory=list, max_length=8)
 
 
 class Extraction(StrictModel):

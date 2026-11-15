@@ -32,7 +32,7 @@ class Limits(unittest.TestCase):
         self.assertEqual(limiter.used, 1)
 
     def test_burst_duplicate_and_concurrency_limits(self):
-        limiter = RequestLimits()
+        limiter = RequestLimits(max_concurrent=3)
         key = limiter.guard('client-a', search=True)
         with self.assertRaises(LimitError) as caught:
             limiter.guard('client-a', search=True)

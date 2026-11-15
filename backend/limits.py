@@ -19,8 +19,9 @@ class LimitError(Exception):
 
 
 class RequestLimits:
-    def __init__(self, daily=500, rpm=5, clock=time.time):
+    def __init__(self, daily=500, rpm=5, clock=time.time, max_concurrent=20):
         self.daily, self.rpm, self.clock = daily, rpm, clock
+        self.max_concurrent = max(1, int(max_concurrent))
         self.lock = threading.Lock()
         self.secret = os.urandom(32)
         self.clients = {}
@@ -69,7 +70,7 @@ class RequestLimits:
                     self._available()
                 if key in self.active:
                     raise LimitError('search_in_progress', 'A search is already running. Wait for it to finish or cancel it first.', 10)
-                if len(self.active) >= 3:
+                if len(self.active) >= self.max_concurrent:
                     raise LimitError('service_busy', 'The research service is busy. Please try again shortly.', 15)
                 self.active.add(key)
             return key
@@ -103,4 +104,8 @@ class RequestLimits:
             return {'dailyLimit': self.daily, 'remaining': max(0, self.daily - self.used), 'resetsAt': reset.astimezone(timezone.utc).isoformat(), 'providerExhausted': self.provider_exhausted}
 
 
-limits = RequestLimits(daily=max(1, int(os.getenv('GEMINI_DAILY_LIMIT', '500'))), rpm=max(1, int(os.getenv('GEMINI_RPM_LIMIT', '5'))))
+limits = RequestLimits(
+    daily=max(1, int(os.getenv('GEMINI_DAILY_LIMIT', '500'))),
+    rpm=max(1, int(os.getenv('GEMINI_RPM_LIMIT', '5'))),
+    max_concurrent=max(1, int(os.getenv('MAX_CONCURRENT_SEARCHES', '20'))),
+)
