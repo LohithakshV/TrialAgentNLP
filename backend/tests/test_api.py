@@ -154,7 +154,7 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['partial'])
         model.assert_awaited_once()
 
-    async def test_audit_failure_keeps_registry_records_with_manual_checklist(self):
+    async def test_audit_failure_keeps_registry_records_with_requirement_checklist(self):
         trials = [dict(id='NCT12345678', title='Registry record', conditions=['Lung cancer'], eligibility='Inclusion Criteria:\n1. Histologically confirmed lung cancer.\n\nExclusion Criteria:\n1. Prior chemotherapy.', description='Manual review needed', ageRange='18 Years and older', sex='ALL')]
         with patch('backend.research.evaluate', new=AsyncMock(side_effect=ValueError('SECRET'))), patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
             events = [item async for item in search(Profile(**PROFILE))]
@@ -166,11 +166,12 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(trial['criteria'])
         self.assertEqual({item['state'] for item in trial['criteria']}, {'met', 'unknown'})
         self.assertNotIn('unavailable', trial['summary'].lower())
+        self.assertNotIn('manual', trial['summary'].lower())
         self.assertEqual(result['guideOrigin'], 'standard')
         self.assertEqual(len(result['guide']), 5)
         self.assertNotIn('SECRET', str(result))
 
-    async def test_partial_audit_uses_manual_checklist_for_missing_trials(self):
+    async def test_partial_audit_uses_requirement_checklist_for_missing_trials(self):
         trials = [
             dict(id='NCT12345678', title='Audited record', conditions=['Lung cancer'], eligibility='Inclusion Criteria:\n1. Stage IIIA disease.', description='Audited', ageRange='18 Years and older', sex='ALL'),
             dict(id='NCT87654321', title='Unscored record', conditions=['Lung cancer'], eligibility='Inclusion Criteria:\n1. Stage IIIA disease.', description='Unscored', ageRange='18 Years and older', sex='ALL'),
@@ -182,7 +183,8 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['searchScope']['evaluation'], 'ai-assisted')
         self.assertEqual(result['trials'][1]['matchScore'], None)
         self.assertTrue(result['trials'][1]['criteria'])
-        self.assertIn('manual checklist', result['partialReason'].lower())
+        self.assertIn('registry requirements', result['partialReason'].lower())
+        self.assertNotIn('manual', result['partialReason'].lower())
 
     async def test_malformed_audit_is_repaired_into_scored_trials(self):
         trials = [dict(id='NCT12345678', title='Registry record', eligibility='criteria', description='Manual review needed')]

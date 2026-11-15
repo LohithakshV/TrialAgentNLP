@@ -140,7 +140,7 @@ async def search_route(request: Request):
         except LimitError as exc:
             yield 'event: error\ndata: ' + json.dumps({'message': exc.message, 'code': exc.code, 'retryAfter': exc.retry_after, 'resetsAt': limits.snapshot()['resetsAt']}) + '\n\n'
         except UPSTREAM_ERRORS:
-            yield 'event: error\ndata: ' + json.dumps({'message': 'The search was interrupted. Please try again. Any records already retrieved remain available for manual review.'}) + '\n\n'
+            yield 'event: error\ndata: ' + json.dumps({'message': 'The search was interrupted. Please try again. Any records already retrieved remain available to review.'}) + '\n\n'
         finally:
             limits.release(client_key)
     return StreamingResponse(stream(), media_type='text/event-stream', headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})

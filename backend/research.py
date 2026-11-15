@@ -108,7 +108,7 @@ async def search(profile):
             yield 'result', result_payload(
                 profile, [unaudited(trial, profile) for trial in trials], discussion_guide(profile),
                 'standard', True,
-                'This search shows a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.',
+                'Registry requirements are marked green when supported by your details and orange when they need confirmation.',
                 'manual-review',
             )
             return
@@ -121,9 +121,9 @@ async def search(profile):
         else:
             guide, guide_origin = discussion_guide(profile), 'standard'
         if not evaluations:
-            reason, evaluation_status = 'This search shows a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.', 'manual-review'
+            reason, evaluation_status = 'Registry requirements are marked green when supported by your details and orange when they need confirmation.', 'manual-review'
         elif partial:
-            reason, evaluation_status = 'Some records show a manual checklist instead of an automated estimate. Green items are supported by your details; orange items need confirmation.', 'ai-assisted'
+            reason, evaluation_status = 'Some records show registry requirements marked green when supported by your details and orange when they need confirmation.', 'ai-assisted'
         else:
             reason, evaluation_status = '', 'ai-assisted'
         yield 'progress', {'step': 2, 'message': 'Preparing your discussion guide'}

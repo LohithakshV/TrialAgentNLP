@@ -207,6 +207,6 @@ def manual_review(profile, trial):
         add('Full inclusion and exclusion criteria', 'unknown', 'No structured criteria were available; confirm every requirement with the study team.')
 
     return {
-        'summary': 'Manual review from the details you supplied and the registry text. Green items are supported by your details; orange items need confirmation with the study team.',
+        'summary': 'Requirements from the registry record. Green items are supported by your details; orange items need confirmation with the study team.',
         'criteria': criteria,
     }
