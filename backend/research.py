@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 from datetime import datetime, timezone
 
@@ -7,8 +9,10 @@ from .models import PreparedQuery
 from .privacy import clean_profile
 from .providers import gemini, retrieve
 
+logger = logging.getLogger(__name__)
+
 TIMEOUT = httpx.Timeout(40, connect=10)
-AUDIT_ERRORS = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, TimeoutError, LimitError)
+AUDIT_ERRORS = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError, TimeoutError, LimitError, RuntimeError)
 
 PREPARATION_INSTRUCTION = '''Classify and prepare a fictional educational clinical-trial registry query. Return only the supplied JSON schema.
 Choose status first:
@@ -94,7 +98,10 @@ async def search(profile):
         yield 'progress', {'step': 1, 'message': 'Auditing eligibility criteria'}
         try:
             audit = await evaluate(client, profile, trials)
-        except AUDIT_ERRORS:
+        except AUDIT_ERRORS as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            code = getattr(exc, 'code', '')
+            logger.warning('eligibility_audit_failed exception=%s status=%s code=%s', type(exc).__name__, status, code or '')
             yield 'progress', {'step': 2, 'message': 'Preparing your discussion guide'}
             yield 'result', result_payload(
                 profile, [unaudited(trial) for trial in trials], discussion_guide(profile),
@@ -111,9 +118,13 @@ async def search(profile):
             guide, guide_origin = [question.model_dump() for question in audit.guide], 'ai'
         else:
             guide, guide_origin = discussion_guide(profile), 'standard'
+        if not evaluations:
+            reason, evaluation_status = 'The automated eligibility audit was unavailable. Registry records are shown for manual review.', 'unavailable'
+        elif partial:
+            reason, evaluation_status = 'Some trials could not be audited. Those records are shown for manual review.', 'ai-assisted'
+        else:
+            reason, evaluation_status = '', 'ai-assisted'
         yield 'progress', {'step': 2, 'message': 'Preparing your discussion guide'}
         yield 'result', result_payload(
-            profile, merged, guide, guide_origin, partial,
-            'Some trials could not be audited. Those records are shown for manual review.' if partial else '',
-            'ai-assisted',
+            profile, merged, guide, guide_origin, partial, reason, evaluation_status,
         )

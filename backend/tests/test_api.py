@@ -165,6 +165,26 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result['guide']), 5)
         self.assertNotIn('SECRET', str(result))
 
+    async def test_malformed_audit_is_repaired_into_scored_trials(self):
+        trials = [dict(id='NCT12345678', title='Registry record', eligibility='criteria', description='Manual review needed')]
+        generated = {
+            'evaluations': [{
+                'nct_id': 'nct12345678',
+                'match_score': '82%',
+                'summary': 'x' * 1000,
+                'criteria': 'Condition listed',
+            }],
+            'guide': ['Ask one?', 'Ask two?', 'Ask three?', 'Ask four?', 'Ask five?'],
+        }
+        with patch('backend.evaluation.gemini', new=AsyncMock(return_value=generated)), patch('backend.research.retrieve', new=AsyncMock(return_value=trials)):
+            events = [item async for item in search(Profile(**PROFILE))]
+        result = events[-1][1]
+        self.assertEqual(result['trials'][0]['matchScore'], 82)
+        self.assertEqual(result['trials'][0]['matchTier'], 'strong')
+        self.assertFalse(result['partial'])
+        self.assertEqual(result['guideOrigin'], 'ai')
+        self.assertEqual(len(result['guide']), 5)
+
     async def test_empty_results_do_not_invoke_the_audit(self):
         with patch('backend.research.evaluate', new_callable=AsyncMock) as model, patch('backend.research.retrieve', new=AsyncMock(return_value=[])):
             events = [item async for item in search(Profile(**PROFILE))]

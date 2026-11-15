@@ -26,6 +26,20 @@ async def _backoff(attempt):
     await asyncio.sleep(min(BASE_DELAY * (2 ** attempt), 8.0))
 
 
+def _parse_json(text):
+    cleaned = text.strip()
+    if cleaned.startswith('```'):
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start, end = cleaned.find('{'), cleaned.rfind('}')
+        if start != -1 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
 async def gemini(client, instruction, data, schema):
     key = os.getenv('GEMINI_API_KEY', '').strip()
     if not key:
@@ -41,7 +55,12 @@ async def gemini(client, instruction, data, schema):
                 headers={'x-goog-api-key': key},
                 json={'systemInstruction': {'parts': [{'text': instruction}]},
                       'contents': [{'role': 'user', 'parts': [{'text': json.dumps(data)}]}],
-                      'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': schema}},
+                      'generationConfig': {
+                          'responseMimeType': 'application/json',
+                          'responseJsonSchema': schema,
+                          'maxOutputTokens': 8192,
+                          'temperature': 0.1,
+                      }},
             )
         except httpx.RequestError:
             if attempt + 1 >= MAX_ATTEMPTS:
@@ -62,8 +81,17 @@ async def gemini(client, instruction, data, schema):
                 await _backoff(attempt)
                 continue
         response.raise_for_status()
-        parts = response.json().get('candidates', [{}])[0].get('content', {}).get('parts', [])
-        return json.loads(''.join(p.get('text', '') for p in parts if not p.get('thought')))
+        payload = response.json()
+        candidates = payload.get('candidates') or []
+        if not candidates:
+            block_reason = payload.get('promptFeedback', {}).get('blockReason')
+            raise ValueError(f'gemini_blocked_{block_reason}' if block_reason else 'gemini_empty_candidates')
+        parts = candidates[0].get('content', {}).get('parts') or []
+        text = ''.join(part.get('text', '') for part in parts if isinstance(part, dict) and not part.get('thought'))
+        if not text.strip():
+            finish_reason = candidates[0].get('finishReason')
+            raise ValueError(f'gemini_empty_response_{finish_reason}' if finish_reason else 'gemini_empty_response')
+        return _parse_json(text)
     raise RuntimeError('provider_attempts_exhausted')
 
 
